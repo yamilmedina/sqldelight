@@ -5,6 +5,7 @@ import app.cash.sqldelight.core.compiler.QueryInterfaceGenerator
 import app.cash.sqldelight.core.compiler.SqlDelightCompiler
 import app.cash.sqldelight.core.compiler.TableInterfaceGenerator
 import app.cash.sqldelight.dialects.postgresql.PostgreSqlDialect
+import app.cash.sqldelight.dialects.sqlite_3_35.SqliteDialect
 import app.cash.sqldelight.test.util.FixtureCompiler
 import app.cash.sqldelight.test.util.withInvariantLineSeparators
 import app.cash.sqldelight.test.util.withUnderscores
@@ -1273,6 +1274,95 @@ class InterfaceGeneration {
     |}
     |
       """.trimMargin(),
+    )
+  }
+
+  @Test fun `row_num query is generated correctly`() {
+    val result = FixtureCompiler.compileSql(
+      sql = """
+      |CREATE TABLE message (
+      |    id INTEGER PRIMARY KEY AUTOINCREMENT,
+      |    conversation_id INTEGER NOT NULL,
+      |    date INTEGER NOT NULL
+      |);
+      |
+      |selectWithRowNumber:
+      |WITH NumberedMessage AS (
+      |    SELECT id,
+      |           conversation_id,
+      |           date,
+      |           IFNULL('', 0) == 1 AS hasValue,
+      |           ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY date DESC) AS row_num
+      |    FROM message
+      |)
+      |SELECT NumberedMessage.id, NumberedMessage.conversation_id, NumberedMessage.date, NumberedMessage.hasValue
+      |FROM NumberedMessage
+      |WHERE row_num <= 10;
+      |
+      """.trimMargin(),
+      temporaryFolder,
+      fileName = "Message.sq",
+      overrideDialect = SqliteDialect(),
+    )
+
+    assertThat(result.errors).isEmpty()
+
+    val query = result.compiledFile.namedQueries[0]
+    val generatedQueries = result.compilerOutput.get(File(result.outputDirectory, "com/example/MessageQueries.kt"))
+    assertThat(generatedQueries).isNotNull()
+    assertThat(generatedQueries.toString()).isEqualTo(
+      """
+      |package com.example
+      |
+      |import app.cash.sqldelight.Query
+      |import app.cash.sqldelight.TransacterImpl
+      |import app.cash.sqldelight.db.SqlDriver
+      |import kotlin.Any
+      |import kotlin.Boolean
+      |import kotlin.Long
+
+      |public class MessageQueries(
+      |  driver: SqlDriver,
+      |) : TransacterImpl(driver) {
+      |  public fun <T : Any> selectWithRowNumber(mapper: (
+      |    id: Long,
+      |    conversation_id: Long,
+      |    date: Long,
+      |    hasValue: Boolean,
+      |  ) -> T): Query<T> = Query(${query.id.withUnderscores}, arrayOf("message"), driver, "Message.sq",
+      |      "selectWithRowNumber", ""${'"'}
+      |  |WITH NumberedMessage AS (
+      |  |    SELECT id,
+      |  |           conversation_id,
+      |  |           date,
+      |  |           IFNULL('', 0) == 1 AS hasValue,
+      |  |           ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY date DESC) AS row_num
+      |  |    FROM message
+      |  |)
+      |  |SELECT NumberedMessage.id, NumberedMessage.conversation_id, NumberedMessage.date, NumberedMessage.hasValue
+      |  |FROM NumberedMessage
+      |  |WHERE row_num <= 10
+      |  ""${'"'}.trimMargin()) { cursor ->
+      |    mapper(
+      |      cursor.getLong(0)!!,
+      |      cursor.getLong(1)!!,
+      |      cursor.getLong(2)!!,
+      |      cursor.getBoolean(3)!!
+      |    )
+      |  }
+
+      |  public fun selectWithRowNumber(): Query<SelectWithRowNumber> = selectWithRowNumber { id,
+      |      conversation_id, date, hasValue ->
+      |    SelectWithRowNumber(
+      |      id,
+      |      conversation_id,
+      |      date,
+      |      hasValue
+      |    )
+      |  }
+      |}
+      |
+       """.trimMargin(),
     )
   }
 
